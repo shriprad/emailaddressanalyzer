@@ -12,7 +12,7 @@ from datetime import datetime
 app = Flask(__name__)
 
 # Configure Gemini AI
-os.environ['GOOGLE_API_KEY'] = 'YOUR_API_KEY_HERE'
+os.environ['GOOGLE_API_KEY'] = 'AIzaSyDPoaPx17CL68O0xhNBqaubSvBB6f2GUXw'
 genai.configure(api_key=os.getenv('GOOGLE_API_KEY'))
 
 # HTML Template
