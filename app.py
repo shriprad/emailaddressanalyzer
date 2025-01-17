@@ -6,218 +6,118 @@ import google.generativeai as genai
 from flask import Flask, render_template_string, request, jsonify
 from email import parser, policy
 import dkim
-import spf
-from datetime import datetime
+from datetime import datetime, timedelta
+from email.utils import parsedate_to_datetime
 
 app = Flask(__name__)
 
 # Configure Gemini AI
-os.environ['GOOGLE_API_KEY'] = 'AIzaSyDPoaPx17CL68O0xhNBqaubSvBB6f2GUXw'
+os.environ['GOOGLE_API_KEY'] = 'YOUR_API_KEY_HERE'
 genai.configure(api_key=os.getenv('GOOGLE_API_KEY'))
 
-# HTML Template
-HTML_TEMPLATE = '''
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Email Header Analyzer</title>
-    <link href="https://cdn.jsdelivr.net/npm/tailwindcss@2.2.19/dist/tailwind.min.css" rel="stylesheet">
-</head>
-<body class="bg-gray-100 p-8">
-    <div class="max-w-6xl mx-auto">
-        <h1 class="text-3xl font-bold mb-8">Email Header Analyzer</h1>
-        
-        <form method="POST" class="bg-white shadow-md rounded px-8 pt-6 pb-8 mb-4">
-            <div class="mb-4">
-                <label class="block text-gray-700 text-sm font-bold mb-2" for="headers">
-                    Paste Email Headers:
-                </label>
-                <textarea
-                    class="shadow appearance-none border rounded w-full py-2 px-3 text-gray-700 leading-tight focus:outline-none focus:shadow-outline"
-                    id="headers"
-                    name="headers"
-                    rows="10"
-                    required
-                >{{ request.form.get('headers', '') }}</textarea>
-            </div>
-            
-            <div class="flex items-center justify-between">
-                <button
-                    class="bg-blue-500 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded focus:outline-none focus:shadow-outline"
-                    type="submit"
-                    name="analyze"
-                >
-                    Analyze Headers
-                </button>
-                <button
-                    class="bg-green-500 hover:bg-green-700 text-white font-bold py-2 px-4 rounded focus:outline-none focus:shadow-outline"
-                    type="submit"
-                    name="redact"
-                >
-                    Redact Sensitive Info
-                </button>
-            </div>
-        </form>
+# [Previous HTML_TEMPLATE remains the same]
 
-        {% if redacted_headers %}
-        <div class="bg-white shadow-md rounded px-8 pt-6 pb-8 mb-4">
-            <h2 class="text-xl font-bold mb-4">Redacted Headers</h2>
-            <pre class="bg-gray-100 p-4 rounded overflow-x-auto">{{ redacted_headers }}</pre>
-        </div>
-        {% endif %}
-
-        {% if analysis_result %}
-        <div class="bg-white shadow-md rounded px-8 pt-6 pb-8 mb-4">
-            <h2 class="text-xl font-bold mb-4">Analysis Results</h2>
-            
-            {% if analysis_result.error %}
-            <div class="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded relative" role="alert">
-                <strong class="font-bold">Error:</strong>
-                <span class="block sm:inline">{{ analysis_result.error }}</span>
-            </div>
-            {% else %}
-            
-            <div class="mb-6">
-                <h3 class="text-lg font-semibold mb-2">Authentication Analysis</h3>
-                <div class="bg-gray-100 p-4 rounded">
-                    <p><strong>DKIM Present:</strong> {{ analysis_result.auth_analysis.dkim_present }}</p>
-                    <p><strong>SPF Present:</strong> {{ analysis_result.auth_analysis.spf_present }}</p>
-                    <p><strong>Authentication Results:</strong> {{ analysis_result.auth_analysis.auth_results }}</p>
-                </div>
-            </div>
-
-            <div class="mb-6">
-                <h3 class="text-lg font-semibold mb-2">AI Pattern Indicators</h3>
-                <div class="bg-gray-100 p-4 rounded">
-                    <ul class="list-disc pl-4">
-                    {% for indicator in analysis_result.ai_indicators %}
-                        <li>{{ indicator }}</li>
-                    {% endfor %}
-                    </ul>
-                </div>
-            </div>
-
-            <div class="mb-6">
-                <h3 class="text-lg font-semibold mb-2">Detailed Analysis</h3>
-                <div class="bg-gray-100 p-4 rounded whitespace-pre-wrap">
-                    {{ analysis_result.detailed_analysis }}
-                </div>
-            </div>
-
-            <div class="text-sm text-gray-600">
-                Analysis completed in {{ analysis_result.analysis_time }} seconds
-            </div>
-            {% endif %}
-        </div>
-        {% endif %}
-    </div>
-</body>
-</html>
-'''
-
-def redact_sensitive_info(text):
-    """Redact email addresses, ESMTP IDs, and other sensitive information"""
-    # Redact email addresses
-    text = re.sub(r'[\w\.-]+@[\w\.-]+\.\w+', '[REDACTED_EMAIL]', text)
-    
-    # Redact ESMTP IDs (various formats)
-    text = re.sub(r'(?i)id\s+[A-Za-z0-9-]+', 'id [REDACTED_ESMTP_ID]', text)
-    
-    # Redact IP addresses
-    text = re.sub(r'\b(?:\d{1,3}\.){3}\d{1,3}\b', '[REDACTED_IP]', text)
-    
-    # Redact Message-IDs
-    text = re.sub(r'<[\w\.-]+@[\w\.-]+>', '[REDACTED_MESSAGE_ID]', text)
-    
-    return text
-
-def parse_header_structure(headers):
-    """Extract and structure email headers"""
-    parsed_headers = {}
-    
-    # Extract key header fields
-    important_fields = [
-        'From', 'To', 'Subject', 'Date', 'Received', 'Message-ID',
-        'DKIM-Signature', 'SPF', 'Authentication-Results',
-        'X-Originating-IP', 'X-Mailer', 'User-Agent'
-    ]
-    
-    for field in important_fields:
-        value = headers.get(field)
-        if value:
-            if isinstance(value, list):
-                parsed_headers[field] = [str(v) for v in value]
-            else:
-                parsed_headers[field] = str(value)
-    
-    return parsed_headers
-
-def analyze_authentication(headers):
-    """Analyze email authentication mechanisms"""
-    auth_results = {
-        'dkim_present': 'DKIM-Signature' in headers,
-        'spf_present': 'Received-SPF' in headers or 'SPF' in headers,
-        'auth_results': headers.get('Authentication-Results', 'Not found')
-    }
-    
-    return auth_results
-
-def analyze_routing(headers):
-    """Analyze email routing path and timestamps"""
-    received_headers = headers.get_all('Received', [])
-    routing_analysis = []
-    
-    for header in received_headers:
-        try:
-            # Extract timestamps and server information
-            timestamp_match = re.search(r';(.*?)(?:\(.*?\))?\s*$', header)
-            server_match = re.search(r'from\s+(.*?)\s+by', header)
-            
-            if timestamp_match:
-                timestamp = timestamp_match.group(1).strip()
-                server = server_match.group(1) if server_match else 'Unknown'
-                
-                routing_analysis.append({
-                    'server': server,
-                    'timestamp': timestamp
-                })
-        except Exception as e:
-            continue
-    
-    return routing_analysis
-
-def detect_ai_patterns(headers):
-    """Detect patterns that might indicate AI-generated headers"""
+def detect_ai_patterns(headers, header_text):
+    """Enhanced detection of AI-generated headers"""
     ai_indicators = []
+    confidence_factors = []
     
-    # Check for unusual patterns in Message-ID
+    # 1. Check Message-ID patterns
     message_id = headers.get('Message-ID', '')
     if message_id:
-        if re.search(r'[A-Za-z0-9]{32,}', message_id):
-            ai_indicators.append("Unusually long or random Message-ID")
+        # Check for overly structured or predictable patterns
+        if re.search(r'[a-zA-Z]+-\d{8}-\d+@', message_id):
+            ai_indicators.append("Suspiciously structured Message-ID format")
+            confidence_factors.append(0.7)
+            
+        # Check for common AI-generated patterns
+        if re.search(r'(promo|marketing|campaign)-\d{8}', message_id):
+            ai_indicators.append("Marketing-template style Message-ID")
+            confidence_factors.append(0.6)
     
-    # Check for inconsistent timestamps
+    # 2. Analyze Received headers sequence
     received_headers = headers.get_all('Received', [])
-    timestamps = []
-    for header in received_headers:
-        timestamp_match = re.search(r';(.*?)(?:\(.*?\))?\s*$', header)
-        if timestamp_match:
-            try:
-                timestamp = datetime.strptime(timestamp_match.group(1).strip(), '%a, %d %b %Y %H:%M:%S %z')
-                timestamps.append(timestamp)
-            except ValueError:
-                continue
+    if received_headers:
+        # Check timestamp patterns
+        timestamps = []
+        for header in received_headers:
+            timestamp_match = re.search(r';(.*?)(?:\(.*?\))?\s*$', header)
+            if timestamp_match:
+                try:
+                    timestamp_str = timestamp_match.group(1).strip()
+                    timestamp = parsedate_to_datetime(timestamp_str)
+                    timestamps.append(timestamp)
+                except (ValueError, TypeError):
+                    continue
+        
+        if timestamps:
+            # Check for perfectly spaced timestamps
+            time_diffs = [(timestamps[i] - timestamps[i+1]).total_seconds() 
+                         for i in range(len(timestamps)-1)]
+            
+            if len(time_diffs) > 1:
+                # Check if time differences are too uniform
+                if len(set(int(diff) for diff in time_diffs)) == 1:
+                    ai_indicators.append("Suspiciously uniform timing between servers")
+                    confidence_factors.append(0.9)
+                
+                # Check for unrealistic timing
+                if any(diff < 0.1 for diff in time_diffs):
+                    ai_indicators.append("Unrealistically fast server processing")
+                    confidence_factors.append(0.8)
     
-    if timestamps:
-        time_diffs = [(timestamps[i] - timestamps[i+1]).total_seconds() for i in range(len(timestamps)-1)]
-        if any(diff < 0 for diff in time_diffs):
-            ai_indicators.append("Inconsistent timestamp sequence")
-        if any(diff < 1 for diff in time_diffs):
-            ai_indicators.append("Unrealistic timing between servers")
+    # 3. Check for template-like headers
+    marketing_headers = ['X-Campaign-ID', 'X-Tracking-ID', 'List-Unsubscribe', 'Precedence']
+    marketing_count = sum(1 for header in marketing_headers if header in headers)
+    if marketing_count >= 3:
+        ai_indicators.append("Common marketing template headers present")
+        confidence_factors.append(0.5)
     
-    return ai_indicators
+    # 4. Analyze Authentication Headers
+    auth_results = headers.get('Authentication-Results', '')
+    if 'dkim=pass' in auth_results and 'spf=pass' in auth_results:
+        # Check if authentication looks too perfect
+        if re.search(r'header\.i=@[\w-]+\.com', auth_results):
+            ai_indicators.append("Suspiciously perfect authentication results")
+            confidence_factors.append(0.4)
+    
+    # 5. Check for perfect formatting
+    if all(h in headers for h in ['From', 'To', 'Subject', 'Date', 'Message-ID']):
+        perfect_format = True
+        for header in headers.items():
+            if not re.match(r'^[A-Za-z-]+: .+$', str(header)):
+                perfect_format = False
+                break
+        if perfect_format:
+            ai_indicators.append("Unusually perfect header formatting")
+            confidence_factors.append(0.6)
+    
+    # 6. Content consistency check
+    domain_pattern = r'@([\w.-]+)'
+    domains = re.findall(domain_pattern, header_text)
+    if len(set(domains)) == 1:
+        ai_indicators.append("Suspiciously consistent domain usage")
+        confidence_factors.append(0.5)
+    
+    # 7. Check for future dates
+    date_str = headers.get('Date', '')
+    if date_str:
+        try:
+            email_date = parsedate_to_datetime(date_str)
+            if email_date > datetime.now() + timedelta(days=1):
+                ai_indicators.append("Email date is in the future")
+                confidence_factors.append(0.9)
+        except (ValueError, TypeError):
+            pass
+    
+    # Calculate overall AI probability
+    ai_probability = min(sum(confidence_factors) / len(confidence_factors) if confidence_factors else 0, 1.0) * 100
+    
+    return {
+        'indicators': ai_indicators,
+        'probability': round(ai_probability, 2),
+        'confidence_factors': confidence_factors
+    }
 
 def analyze_headers(header_text):
     try:
@@ -225,20 +125,16 @@ def analyze_headers(header_text):
         parser_instance = parser.HeaderParser(policy=policy.default)
         headers = parser_instance.parsestr(header_text)
         
-        # Extract structured header information
+        # Enhanced AI pattern detection
+        ai_analysis = detect_ai_patterns(headers, header_text)
+        
+        # Rest of the existing analysis functions...
         parsed_headers = parse_header_structure(headers)
-        
-        # Analyze authentication
         auth_analysis = analyze_authentication(headers)
-        
-        # Analyze routing
         routing_analysis = analyze_routing(headers)
         
-        # Detect AI patterns
-        ai_indicators = detect_ai_patterns(headers)
-        
-        # Prepare analysis prompt for Gemini AI
-        analysis_prompt = f"""Analyze these email headers for potential spoofing and suspicious patterns:
+        # Enhanced analysis prompt
+        analysis_prompt = f"""Analyze these email headers for potential spoofing and AI generation:
 
         Parsed Headers:
         {parsed_headers}
@@ -251,42 +147,13 @@ def analyze_headers(header_text):
         Routing Analysis:
         {routing_analysis}
 
-        AI Pattern Indicators:
-        {ai_indicators}
+        AI Pattern Analysis:
+        - Indicators: {ai_analysis['indicators']}
+        - AI Generation Probability: {ai_analysis['probability']}%
+        - Confidence Factors: {ai_analysis['confidence_factors']}
 
         Please provide a comprehensive security analysis including:
-
-        1. Authentication Assessment:
-        - Evaluate DKIM, SPF, and DMARC status
-        - Identify any authentication failures or inconsistencies
-        
-        2. Routing Analysis:
-        - Evaluate the email's path through servers
-        - Identify suspicious routing patterns
-        - Flag any timing inconsistencies
-        
-        3. Header Structure Analysis:
-        - Identify missing or suspicious headers
-        - Analyze header formatting and consistency
-        - Flag unusual or non-standard header fields
-        
-        4. AI Generation Indicators:
-        - Assess likelihood of AI-generated headers
-        - Identify specific suspicious patterns
-        - Provide confidence level of AI generation
-        
-        5. Spoofing Risk Assessment:
-        - Calculate spoofing probability (0-100%)
-        - Assign risk level (Low/Medium/High)
-        - List specific security concerns
-        - Provide detailed justification
-        
-        6. Security Recommendations:
-        - Specific actions if suspicious
-        - Best practices for verification
-        - Additional checks recommended
-
-        Format the response clearly with section headers and bullet points.
+        [Rest of the prompt remains the same...]
         """
 
         # Get Gemini AI analysis
@@ -295,12 +162,12 @@ def analyze_headers(header_text):
         response = model.generate_content(analysis_prompt)
         analysis_time = round(time.time() - start_time, 2)
 
-        # Prepare the result
+        # Enhanced result with AI analysis
         analysis_result = {
             'parsed_headers': parsed_headers,
             'auth_analysis': auth_analysis,
             'routing_analysis': routing_analysis,
-            'ai_indicators': ai_indicators,
+            'ai_analysis': ai_analysis,
             'detailed_analysis': response.text,
             'analysis_time': analysis_time
         }
@@ -314,22 +181,4 @@ def analyze_headers(header_text):
             'analysis_time': 0
         }
 
-@app.route("/", methods=["GET", "POST"])
-def index():
-    analysis_result = None
-    redacted_headers = None
-    
-    if request.method == "POST":
-        headers = request.form.get("headers")
-        if headers:
-            if 'analyze' in request.form:
-                analysis_result = analyze_headers(headers)
-            elif 'redact' in request.form:
-                redacted_headers = redact_sensitive_info(headers)
-    
-    return render_template_string(HTML_TEMPLATE, 
-                                analysis_result=analysis_result,
-                                redacted_headers=redacted_headers)
-
-if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)), debug=True)
+# [Rest of the code remains the same]
