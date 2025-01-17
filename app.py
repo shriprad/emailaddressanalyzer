@@ -1,52 +1,44 @@
+import os
+import time
+import re
+import base64
+import google.generativeai as genai
+from flask import Flask, render_template_string, request, jsonify
+from email import parser, policy
+import dkim
+from datetime import datetime, timedelta
+from email.utils import parsedate_to_datetime
+
+app = Flask(__name__)
+
+# Configure Gemini AI
+os.environ['GOOGLE_API_KEY'] = 'AIzaSyDPoaPx17CL68O0xhNBqaubSvBB6f2GUXw'
+genai.configure(api_key=os.getenv('GOOGLE_API_KEY'))
+
+# [Previous HTML_TEMPLATE remains the same]
+
 def detect_ai_patterns(headers, header_text):
-    """Enhanced detection of AI-generated headers with improved pattern recognition"""
+    """Enhanced detection of AI-generated headers"""
     ai_indicators = []
     confidence_factors = []
     
-    # 1. Message-ID Analysis
+    # 1. Check Message-ID patterns
     message_id = headers.get('Message-ID', '')
     if message_id:
-        # Check for automated naming patterns
-        if re.search(r'(promo|marketing|campaign|auto|mail)-\d{8}-\d+@', message_id):
-            ai_indicators.append("AI-typical Message-ID format detected")
-            confidence_factors.append(0.8)
-        
-        # Check for timestamp-based IDs
-        current_date = datetime.now()
-        date_matches = re.findall(r'(\d{8})', message_id)
-        for date_str in date_matches:
-            try:
-                msg_date = datetime.strptime(date_str, '%Y%m%d')
-                if msg_date > current_date:
-                    ai_indicators.append("Future date in Message-ID")
-                    confidence_factors.append(0.95)
-            except ValueError:
-                continue
+        # Check for overly structured or predictable patterns
+        if re.search(r'[a-zA-Z]+-\d{8}-\d+@', message_id):
+            ai_indicators.append("Suspiciously structured Message-ID format")
+            confidence_factors.append(0.7)
+            
+        # Check for common AI-generated patterns
+        if re.search(r'(promo|marketing|campaign)-\d{8}', message_id):
+            ai_indicators.append("Marketing-template style Message-ID")
+            confidence_factors.append(0.6)
     
-    # 2. Advanced Header Pattern Analysis
-    marketing_headers = {
-        'X-Campaign-ID': 0.7,
-        'X-Tracking-ID': 0.6,
-        'List-Unsubscribe': 0.4,
-        'Precedence': 0.3,
-        'X-Mailer': 0.5
-    }
-    
-    marketing_score = 0
-    present_marketing_headers = 0
-    for header, weight in marketing_headers.items():
-        if header in headers:
-            marketing_score += weight
-            present_marketing_headers += 1
-    
-    if present_marketing_headers >= 3:
-        normalized_score = marketing_score / present_marketing_headers
-        ai_indicators.append(f"Marketing automation headers detected (Score: {normalized_score:.2f})")
-        confidence_factors.append(normalized_score)
-    
-    # 3. Timing Analysis
+    # 2. Analyze Received headers sequence
     received_headers = headers.get_all('Received', [])
     if received_headers:
+        # Check timestamp patterns
         timestamps = []
         for header in received_headers:
             timestamp_match = re.search(r';(.*?)(?:\(.*?\))?\s*$', header)
@@ -58,102 +50,135 @@ def detect_ai_patterns(headers, header_text):
                 except (ValueError, TypeError):
                     continue
         
-        if len(timestamps) >= 2:
+        if timestamps:
+            # Check for perfectly spaced timestamps
             time_diffs = [(timestamps[i] - timestamps[i+1]).total_seconds() 
                          for i in range(len(timestamps)-1)]
             
-            # Check for suspicious patterns
-            if time_diffs:
-                # Too uniform timing
+            if len(time_diffs) > 1:
+                # Check if time differences are too uniform
                 if len(set(int(diff) for diff in time_diffs)) == 1:
-                    ai_indicators.append("Suspiciously uniform server processing times")
+                    ai_indicators.append("Suspiciously uniform timing between servers")
                     confidence_factors.append(0.9)
                 
-                # Unrealistic processing speed
-                if any(0 < diff < 1.0 for diff in time_diffs):
+                # Check for unrealistic timing
+                if any(diff < 0.1 for diff in time_diffs):
                     ai_indicators.append("Unrealistically fast server processing")
-                    confidence_factors.append(0.95)
-                
-                # Too perfect progression
-                if all(abs(time_diffs[i] - time_diffs[i+1]) < 0.1 for i in range(len(time_diffs)-1)):
-                    ai_indicators.append("Too perfect timing progression")
-                    confidence_factors.append(0.85)
+                    confidence_factors.append(0.8)
     
-    # 4. Content Consistency Analysis
-    domains = re.findall(r'@([\w.-]+)', header_text)
-    unique_domains = set(domains)
+    # 3. Check for template-like headers
+    marketing_headers = ['X-Campaign-ID', 'X-Tracking-ID', 'List-Unsubscribe', 'Precedence']
+    marketing_count = sum(1 for header in marketing_headers if header in headers)
+    if marketing_count >= 3:
+        ai_indicators.append("Common marketing template headers present")
+        confidence_factors.append(0.5)
     
-    if len(domains) > 3 and len(unique_domains) == 1:
-        ai_indicators.append("Suspiciously consistent domain usage across headers")
-        confidence_factors.append(0.75)
-    
-    # 5. Authentication Pattern Analysis
+    # 4. Analyze Authentication Headers
     auth_results = headers.get('Authentication-Results', '')
-    dkim_sig = headers.get('DKIM-Signature', '')
+    if 'dkim=pass' in auth_results and 'spf=pass' in auth_results:
+        # Check if authentication looks too perfect
+        if re.search(r'header\.i=@[\w-]+\.com', auth_results):
+            ai_indicators.append("Suspiciously perfect authentication results")
+            confidence_factors.append(0.4)
     
-    if auth_results and dkim_sig:
-        # Check for too-perfect authentication
-        if ('dkim=pass' in auth_results.lower() and 
-            'spf=pass' in auth_results.lower() and
-            re.search(r'v=1;\s*a=rsa-sha256;\s*c=relaxed/relaxed', dkim_sig)):
-            
-            ai_indicators.append("Suspiciously perfect authentication setup")
+    # 5. Check for perfect formatting
+    if all(h in headers for h in ['From', 'To', 'Subject', 'Date', 'Message-ID']):
+        perfect_format = True
+        for header in headers.items():
+            if not re.match(r'^[A-Za-z-]+: .+$', str(header)):
+                perfect_format = False
+                break
+        if perfect_format:
+            ai_indicators.append("Unusually perfect header formatting")
             confidence_factors.append(0.6)
     
-    # 6. Header Structure Analysis
-    required_headers = ['From', 'To', 'Subject', 'Date', 'Message-ID']
-    optional_headers = ['Reply-To', 'Return-Path', 'X-Mailer']
+    # 6. Content consistency check
+    domain_pattern = r'@([\w.-]+)'
+    domains = re.findall(domain_pattern, header_text)
+    if len(set(domains)) == 1:
+        ai_indicators.append("Suspiciously consistent domain usage")
+        confidence_factors.append(0.5)
     
-    present_required = sum(1 for h in required_headers if h in headers)
-    present_optional = sum(1 for h in optional_headers if h in headers)
-    
-    if present_required == len(required_headers) and present_optional >= 2:
-        header_format_score = 0
-        for header in headers.items():
-            if re.match(r'^[A-Za-z-]+: .+$', str(header)):
-                header_format_score += 1
-        
-        if header_format_score / len(list(headers.items())) > 0.95:
-            ai_indicators.append("Unusually perfect header formatting and completeness")
-            confidence_factors.append(0.7)
-    
-    # 7. Date Pattern Analysis
+    # 7. Check for future dates
     date_str = headers.get('Date', '')
     if date_str:
         try:
             email_date = parsedate_to_datetime(date_str)
-            now = datetime.now()
-            
-            # Check future dates
-            if email_date > now + timedelta(days=1):
+            if email_date > datetime.now() + timedelta(days=1):
                 ai_indicators.append("Email date is in the future")
-                confidence_factors.append(0.95)
-            
-            # Check round-number timestamps
-            if email_date.second == 0 and email_date.microsecond == 0:
-                ai_indicators.append("Suspiciously round timestamp")
-                confidence_factors.append(0.4)
+                confidence_factors.append(0.9)
         except (ValueError, TypeError):
             pass
     
-    # 8. Machine-Generated Content Indicators
-    mailer = headers.get('X-Mailer', '')
-    if mailer:
-        if re.search(r'(Marketing|Campaign|Promo|Auto|Bot|Suite)\s+v?\d+\.\d+', mailer, re.I):
-            ai_indicators.append("Automated marketing system signature detected")
-            confidence_factors.append(0.65)
-    
-    # Calculate weighted AI probability
-    weights = [0.8, 0.9, 0.7, 0.6, 0.8, 0.7, 0.9, 0.6]  # Weights for different types of checks
-    if confidence_factors:
-        weighted_scores = [cf * w for cf, w in zip(confidence_factors, weights[:len(confidence_factors)])]
-        ai_probability = min(sum(weighted_scores) / sum(weights[:len(confidence_factors)]), 1.0) * 100
-    else:
-        ai_probability = 0
+    # Calculate overall AI probability
+    ai_probability = min(sum(confidence_factors) / len(confidence_factors) if confidence_factors else 0, 1.0) * 100
     
     return {
         'indicators': ai_indicators,
         'probability': round(ai_probability, 2),
-        'confidence_factors': confidence_factors,
-        'indicator_count': len(ai_indicators)
+        'confidence_factors': confidence_factors
     }
+
+def analyze_headers(header_text):
+    try:
+        # Parse the email headers
+        parser_instance = parser.HeaderParser(policy=policy.default)
+        headers = parser_instance.parsestr(header_text)
+        
+        # Enhanced AI pattern detection
+        ai_analysis = detect_ai_patterns(headers, header_text)
+        
+        # Rest of the existing analysis functions...
+        parsed_headers = parse_header_structure(headers)
+        auth_analysis = analyze_authentication(headers)
+        routing_analysis = analyze_routing(headers)
+        
+        # Enhanced analysis prompt
+        analysis_prompt = f"""Analyze these email headers for potential spoofing and AI generation:
+
+        Parsed Headers:
+        {parsed_headers}
+
+        Authentication Analysis:
+        - DKIM Present: {auth_analysis['dkim_present']}
+        - SPF Present: {auth_analysis['spf_present']}
+        - Authentication Results: {auth_analysis['auth_results']}
+
+        Routing Analysis:
+        {routing_analysis}
+
+        AI Pattern Analysis:
+        - Indicators: {ai_analysis['indicators']}
+        - AI Generation Probability: {ai_analysis['probability']}%
+        - Confidence Factors: {ai_analysis['confidence_factors']}
+
+        Please provide a comprehensive security analysis including:
+        [Rest of the prompt remains the same...]
+        """
+
+        # Get Gemini AI analysis
+        model = genai.GenerativeModel('gemini-pro')
+        start_time = time.time()
+        response = model.generate_content(analysis_prompt)
+        analysis_time = round(time.time() - start_time, 2)
+
+        # Enhanced result with AI analysis
+        analysis_result = {
+            'parsed_headers': parsed_headers,
+            'auth_analysis': auth_analysis,
+            'routing_analysis': routing_analysis,
+            'ai_analysis': ai_analysis,
+            'detailed_analysis': response.text,
+            'analysis_time': analysis_time
+        }
+
+        return analysis_result
+
+    except Exception as e:
+        return {
+            'error': str(e),
+            'analysis': 'Analysis failed due to an error',
+            'analysis_time': 0
+        }
+
+# [Rest of the code remains the same]
